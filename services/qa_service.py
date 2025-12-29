@@ -1,4 +1,3 @@
-# services/qa_service.py
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from services.document_processor import DocumentProcessor
@@ -9,9 +8,7 @@ from typing import List, Dict, Optional, Tuple
 import logging
 import time
 import re
-from sentence_transformers import SentenceTransformer
-import torch
-import numpy as np
+import requests
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -27,6 +24,9 @@ MAX_CONTEXT_CHUNKS = 20
 MAX_HISTORY_MESSAGES = 20
 CONTEXT_WINDOW_CHARS = 12000
 SEMANTIC_THRESHOLD = 0.3
+
+# Hugging Face API endpoint - UPDATE THIS after deployment
+HF_API_URL = os.getenv("HF_ATTENTION_API_URL", "https://RK05-semantic-attention-api.hf.space/compute_attention")
 
 class ConversationMemory:
     """Track user-stated facts with enhanced parsing."""
@@ -64,55 +64,14 @@ class ConversationMemory:
             del self.last_topic[chat_id]
         logger.info(f"[MEMORY] Cleared all facts for chat {chat_id}")
 
-class SemanticAttention:
-    """Memory-optimized semantic attention using smaller model."""
-    def __init__(self, model_name='paraphrase-MiniLM-L3-v2'):
-        logger.info(f"[ATTENTION] Initializing SemanticAttention with model: {model_name}")
-        # Use smaller model and optimize memory
-        self.model = SentenceTransformer(model_name)
-        self.device = 'cpu'  # Force CPU to save memory
-        self.model.to(self.device)
-        
-        # Set model to eval mode and disable gradient computation
-        self.model.eval()
-        torch.set_grad_enabled(False)
-        
-        logger.info(f"[ATTENTION] Model loaded on device: {self.device}")
-    
-    def compute_attention_scores(self, query: str, texts: List[str]) -> np.ndarray:
-        """Compute attention scores with memory optimization."""
-        if not texts:
-            return np.array([])
-        
-        logger.info(f"[ATTENTION] Computing attention for query over {len(texts)} texts")
-        
-        with torch.no_grad():  # Disable gradients to save memory
-            # Encode query and texts
-            query_embedding = self.model.encode(
-                query, 
-                convert_to_tensor=True,
-                show_progress_bar=False,
-                batch_size=1  # Process one at a time to save memory
-            )
-            text_embeddings = self.model.encode(
-                texts, 
-                convert_to_tensor=True,
-                show_progress_bar=False,
-                batch_size=8  # Smaller batch size
-            )
-            
-            # Compute cosine similarity
-            similarities = torch.nn.functional.cosine_similarity(
-                query_embedding.unsqueeze(0), 
-                text_embeddings
-            ).cpu().numpy()
-        
-        logger.info(f"[ATTENTION] Scores - min: {similarities.min():.3f}, max: {similarities.max():.3f}")
-        
-        return similarities
+class SemanticAttentionAPI:
+    """Remote semantic attention using Hugging Face API."""
+    def __init__(self, api_url: str = HF_API_URL):
+        self.api_url = api_url
+        logger.info(f"[ATTENTION] Using remote API: {self.api_url}")
     
     def select_relevant_context(self, query: str, history: List, max_msgs: int = 8) -> List:
-        """Select most relevant messages using semantic attention."""
+        """Select most relevant messages using remote semantic attention API."""
         if not history or len(history) <= max_msgs:
             logger.info(f"[ATTENTION] History length {len(history)} <= {max_msgs}, returning all")
             return history
@@ -125,25 +84,43 @@ class SemanticAttention:
             else:
                 msg_texts.append(str(msg))
         
-        # Compute attention scores
-        attention_scores = self.compute_attention_scores(query, msg_texts)
-        
-        # Always include last 5 messages (recency bias)
-        relevant_indices = set(range(max(0, len(history) - 5), len(history)))
-        logger.info(f"[ATTENTION] Including last 5 messages by default")
-        
-        # Add most relevant messages based on attention scores
-        ranked_indices = np.argsort(attention_scores)[::-1]
-        for idx in ranked_indices:
-            if attention_scores[idx] > SEMANTIC_THRESHOLD or len(relevant_indices) < 4:
-                relevant_indices.add(idx)
-                logger.info(f"[ATTENTION] Adding message {idx} with score {attention_scores[idx]:.3f}")
-            if len(relevant_indices) >= max_msgs:
-                break
-        
-        selected = sorted(relevant_indices)
-        logger.info(f"[ATTENTION] Selected {len(selected)} messages")
-        return [history[i] for i in selected]
+        try:
+            # Call remote API
+            logger.info(f"[ATTENTION] Calling API for {len(msg_texts)} messages")
+            response = requests.post(
+                self.api_url,
+                json={
+                    "query": query,
+                    "texts": msg_texts,
+                    "threshold": SEMANTIC_THRESHOLD,
+                    "max_results": max_msgs
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                selected_indices = result["selected_indices"]
+                scores = result["scores"]
+                
+                logger.info(f"[ATTENTION] API returned {len(selected_indices)} messages")
+                logger.info(f"[ATTENTION] Scores - min: {min(scores):.3f}, max: {max(scores):.3f}")
+                
+                return [history[i] for i in selected_indices]
+            else:
+                logger.error(f"[ATTENTION] API error: {response.status_code}")
+                # Fallback to recency-based selection
+                return self._fallback_selection(history, max_msgs)
+                
+        except Exception as e:
+            logger.exception(f"[ATTENTION] API call failed: {e}")
+            # Fallback to recency-based selection
+            return self._fallback_selection(history, max_msgs)
+    
+    def _fallback_selection(self, history: List, max_msgs: int) -> List:
+        """Fallback: simple recency-based selection if API fails."""
+        logger.info("[ATTENTION] Using fallback recency-based selection")
+        return history[-max_msgs:]
 
 class QAService:
     def __init__(self):
@@ -159,11 +136,11 @@ class QAService:
         self.doc_processor = DocumentProcessor()
         self.db = MongoMessageDB()
         self.memory = ConversationMemory()
-        self.attention = SemanticAttention()
-        logger.info("[QA_SERVICE] Initialization complete")
+        self.attention = SemanticAttentionAPI()
+        logger.info("[QA_SERVICE] Initialization complete (using remote attention API)")
 
     def _is_explicit_variable_assignment(self, question: str) -> bool:
-        """Check if this is an EXPLICIT variable assignment like 'A = 55' or 'let x = 100'."""
+        """Check if this is an EXPLICIT variable assignment."""
         q = question.strip()
         return bool(re.match(r'^(?:let\s+)?([a-zA-Z_]\w*)\s*=\s*(.+)$', q, re.IGNORECASE))
 
@@ -183,7 +160,7 @@ class QAService:
         return False
 
     def _detect_user_statement(self, question: str, chat_id: str) -> Optional[Tuple[str, str]]:
-        """Enhanced detection of user statements - ONLY name/age, NOT variable assignments."""
+        """Enhanced detection of user statements."""
         q = question.strip()
         logger.info(f"[STATEMENT_DETECT] Checking: '{q}'")
         
@@ -245,7 +222,7 @@ class QAService:
         return None
 
     def _detect_recall_question(self, question: str, chat_id: str) -> Optional[str]:
-        """Enhanced recall detection - ONLY for explicit user facts."""
+        """Enhanced recall detection."""
         q = question.lower().strip()
         logger.info(f"[RECALL_DETECT] Checking: '{q}'")
         
@@ -292,7 +269,7 @@ class QAService:
         return None
 
     def _detect_pronoun_reference(self, question: str, chat_id: str) -> Optional[str]:
-        """Detect pronoun references to previous topics."""
+        """Detect pronoun references."""
         q = question.lower().strip()
         
         pronoun_patterns = [
@@ -382,7 +359,7 @@ class QAService:
                 context_parts.append(content)
                 total_chars += len(content)
         
-        logger.info(f"[CONTEXT] Built with {len(context_parts)} chunks, {total_chars} chars")
+        logger.info(f"[CONTEXT] Built with {len(context_parts)} chunks")
         return "\n\n---\n\n".join(context_parts)
 
     def _has_material(self, user_id: str, material_id: Optional[str]) -> bool:
@@ -419,7 +396,7 @@ class QAService:
         material_id: Optional[str],
         general_mode: bool
     ) -> Dict:
-        """Smart QA with semantic attention."""
+        """Smart QA with remote semantic attention."""
         start_ts = time.time()
         logger.info(f"[QA] ========== NEW QUERY ==========")
         logger.info(f"[QA] Question: '{question}'")
@@ -472,6 +449,8 @@ class QAService:
                 answer = response.content.strip()
                 
                 self.db.add_message(chat_id, user_id, "assistant", answer)
+                elapsed = time.time() - start_ts
+                logger.info(f"[QA] Mode: general | Time: {elapsed:.2f}s")
                 return {"answer": answer, "sources": [], "mode": "general"}
 
             # Check for material
@@ -494,6 +473,8 @@ class QAService:
                 answer = response.content.strip()
                 
                 self.db.add_message(chat_id, user_id, "assistant", answer)
+                elapsed = time.time() - start_ts
+                logger.info(f"[QA] Mode: no_material | Time: {elapsed:.2f}s")
                 return {"answer": answer, "sources": [], "mode": "no_material"}
 
             # MATERIAL MODE
@@ -522,7 +503,7 @@ class QAService:
             max_similarity = max([c.get("similarity", 0) for c in chunks], default=0)
             has_relevant_material = bool(context and max_similarity > 0.2)
             
-            # Select relevant history
+            # Select relevant history using remote API
             relevant_history = self.attention.select_relevant_context(question, full_history)
             
             # Add facts

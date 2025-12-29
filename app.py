@@ -17,17 +17,22 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+#Initialize
+doc_processor = DocumentProcessor()
+qa_service = QAService()
+socratic_tutor = SocraticTutor()
+quiz_generator = QuizGenerator()
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "healthy"}), 200
 
 @app.route('/process-document', methods=['POST'])
 def process_document():
-    doc_processor = DocumentProcessor()
     try:
         data = request.get_json(force=True)
         file_buffer = data.get('file_buffer')
-        file_name = data.get('file_name')
+        file_name = data.get('fiale_name')
         user_id = data.get('user_id')
         material_id = data.get('material_id')
 
@@ -60,7 +65,7 @@ def process_document():
 
 @app.route('/ask-question', methods=['POST'])
 def ask_question():
-    qa_service = QAService()
+    
     try:
         data = request.json
         question = data.get('question')
@@ -89,7 +94,7 @@ def ask_question():
 
 @app.route('/socratic-question', methods=['POST'])
 def socratic_question():
-    socratic_tutor = SocraticTutor()
+    
     """Socratic questioning mode"""
     try:
         data = request.json
@@ -112,7 +117,7 @@ def socratic_question():
 
 @app.route('/generate-quiz', methods=['POST'])
 def generate_quiz():
-    quiz_generator = QuizGenerator()
+    
     """
     Generate quiz from materials with enterprise-grade validation
     
@@ -210,7 +215,7 @@ def generate_quiz():
 
 @app.route('/generate-flashcards', methods=['POST'])
 def generate_flashcards():
-    quiz_generator = QuizGenerator()
+    
     try:
         data = request.json
         topic = data.get('topic')
@@ -229,80 +234,6 @@ def generate_flashcards():
         return jsonify({"flashcards": flashcards}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-# @app.route('/evaluate-answers', methods=['POST'])
-# def evaluate_answers():
-#     """
-#     Evaluate quiz answers and provide personalized feedback
-    
-#     Request body:
-#     {
-#         "answers": [str],           # User's answers array
-#         "correct_answers": [str],   # Correct answers array
-#         "topic": str,               # Quiz topic
-#         "difficulty": str           # Quiz difficulty
-#     }
-    
-#     Returns:
-#     {
-#         "score": float,
-#         "correct": int,
-#         "total": int,
-#         "performance_level": str,
-#         "feedback": str,
-#         "suggested_difficulty": str,
-#         "mastery_percentage": float
-#     }
-#     """
-#     try:
-#         data = request.json
-        
-#         answers = data.get('answers')
-#         correct_answers = data.get('correct_answers')
-#         topic = data.get('topic')
-#         difficulty = data.get('difficulty', 'medium')
-        
-#         # Validate inputs
-#         if not answers or not correct_answers:
-#             return jsonify({
-#                 "error": "Missing required fields: 'answers' and 'correct_answers'"
-#             }), 400
-        
-#         if not isinstance(answers, list) or not isinstance(correct_answers, list):
-#             return jsonify({
-#                 "error": "Answers must be arrays"
-#             }), 400
-        
-#         if len(answers) != len(correct_answers):
-#             return jsonify({
-#                 "error": f"Answer count mismatch: got {len(answers)}, expected {len(correct_answers)}"
-#             }), 400
-        
-#         logger.info(f"Evaluating {len(answers)} answers for topic '{topic}'")
-        
-#         # Evaluate answers
-#         result = quiz_generator.evaluate_answers(
-#             user_answers=answers,
-#             correct_answers=correct_answers,
-#             topic=topic,
-#             difficulty=difficulty
-#         )
-        
-#         if 'error' in result:
-#             logger.warning(f"Evaluation failed: {result['error']}")
-#             return jsonify(result), 400
-        
-#         logger.info(f"Evaluation complete: score={result['score']:.1f}%")
-        
-#         return jsonify(result), 200
-        
-#     except Exception as e:
-#         logger.error(f"Unexpected error in evaluate_answers: {e}", exc_info=True)
-#         return jsonify({
-#             "error": "An unexpected error occurred",
-#             "details": str(e)
-#         }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
